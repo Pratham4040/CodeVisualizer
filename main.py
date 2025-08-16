@@ -134,7 +134,34 @@ class CodeVisitor(ast.NodeVisitor):
                     self.visit(child_node)
             else:
                 break
-
+    def visit_Expr(self, node):
+       if isinstance(node.value,ast.call):
+           if isinstance(node.value.func,ast.Attribute):
+               var_name = node.value.func.value.id
+               method_name = node.value.func.attr
+               if var_name in self.scope:
+                   obj = self.scope[var_name]
+                   args = [self._evaluate_expr(arg) for arg in node.value.args]
+                   message=""
+                   if isinstance(obj, list):
+                       if method_name == "append":
+                           obj.append(*args)
+                           message = f"Appended {args[0]} to list '{var_name}'"
+                       elif method_name == 'pop':
+                           result = obj.pop(*args)
+                           message = f"Pops {repr(result)} from list '{var_name}'"
+                   elif isinstance(obj, dict):
+                       if method_name == "update":
+                           obj.update(*args)
+                           message = f"Updated dictionary '{var_name}' with {args[0]}"
+                       elif method_name == 'get':
+                           result = obj.get(*args, None)
+                           message = f"Gets {repr(result)} from dictionary '{var_name}'"
+                       elif method_name == 'pop':
+                            result = obj.pop(*args)
+                            message = f"Pops key {repr(args[0])} from dict '{var_name}'"
+                   if message:
+                        self._add_step(node.lineno, message)
 @app.post("/visualize")
 async def visualize_code(payload: CodePayload):
     try:
