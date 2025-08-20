@@ -3,6 +3,7 @@ import operator
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+import copy 
 
 # --- FastAPI App Setup ---
 app = FastAPI(
@@ -26,32 +27,27 @@ class CodePayload(BaseModel):
 
 ITERATION_LIMIT = 1000
 
-
+# --- AST VISITOR CLASS ---
 class CodeVisitor(ast.NodeVisitor):
     def __init__(self):
         self.scope = {}
         self.steps = []
         self.step_count = 0
 
-
     def _add_step(self, line, message):
-
         if self.step_count >= ITERATION_LIMIT:
             raise RecursionError("Exceeded maximum iteration limit")
         self.steps.append({
             "line": line,
             "message": message,
-            "scope": self.scope.copy()
+            "scope": copy.deepcopy(self.scope)
         })
         self.step_count += 1
-
 
     def generic_visit(self, node):
         super().generic_visit(node)
 
-
     def _evaluate_expr(self, node):
-
         if isinstance(node, ast.Constant):
             return node.value
         elif isinstance(node, ast.Name):
@@ -69,7 +65,6 @@ class CodeVisitor(ast.NodeVisitor):
             }
             if type(node.op) not in op_map:
                 raise NotImplementedError(f"Operator {type(node.op)} not supported")
-
             return op_map[type(node.op)](left, right)
         elif isinstance(node, ast.Compare):
             left = self._evaluate_expr(node.left)
@@ -78,31 +73,90 @@ class CodeVisitor(ast.NodeVisitor):
                 ast.Eq: operator.eq, ast.NotEq: operator.ne,
                 ast.Lt: operator.lt, ast.LtE: operator.le,
                 ast.Gt: operator.gt, ast.GtE: operator.ge,
+                ast.In: lambda a, b: a in b,
+                ast.NotIn: lambda a, b: a not in b,
             }
             if type(node.ops[0]) not in op_map:
                 raise NotImplementedError(f"Comparison {type(node.ops[0])} not supported")
             return op_map[type(node.ops[0])](left, right)
+        
         elif isinstance(node, ast.Call):
+            # --- THIS IS THE FIX ---
+            # Handle the built-in len() function
+            if isinstance(node.func, ast.Name) and node.func.id == 'len':
+                if len(node.args) == 1:
+                    evaluated_arg = self._evaluate_expr(node.args[0])
+                    return len(evaluated_arg)
+            
             if isinstance(node.func, ast.Name) and node.func.id == 'range':
                 args = [self._evaluate_expr(arg) for arg in node.args]
                 return range(*args)
+            
             else:
                 raise NotImplementedError(f"Function call '{getattr(node.func, 'id', 'N/A')}' not supported")
+        
+        elif isinstance(node, ast.List):
+            return [self._evaluate_expr(e) for e in node.elts]
+        elif isinstance(node, ast.Dict):    
+            return {self._evaluate_expr(k): self._evaluate_expr(v) for k, v in zip(node.keys, node.values)}
+        elif isinstance(node, ast.Subscript):
+            var = self._evaluate_expr(node.value)
+            key_or_index = self._evaluate_expr(node.slice)
+            return var[key_or_index]
         else:
             raise NotImplementedError(f"Expression type '{type(node).__name__}' not supported")
 
-
     def visit_Assign(self, node):
-        variable_name = node.targets[0].id
+        target = node.targets[0]
         value = self._evaluate_expr(node.value)
-        self.scope[variable_name] = value
-        
-        self._add_step(
-            node.lineno,
-            f"Assigns {repr(value)} to variable '{variable_name}'"
-        )
+        if isinstance(target, ast.Name):
+            variable_name = target.id
+            self.scope[variable_name] = value
+            self._add_step(
+                node.lineno,
+                f"Assigns {repr(value)} to variable '{variable_name}'"
+            )
+        elif isinstance(target, ast.Subscript):
+            var = self._evaluate_expr(target.value)
+            key_or_index = self._evaluate_expr(target.slice)
+            var[key_or_index] = value
+            self._add_step(
+                node.lineno,
+                f"Assigns {repr(value)} to index/key {repr(key_or_index)} of '{target.value.id}'"
+            )
 
-    
+    def visit_Expr(self, node):
+        if isinstance(node.value, ast.Call):
+            if isinstance(node.value.func, ast.Attribute):
+                var_name = node.value.func.value.id
+                method_name = node.value.func.attr
+                
+                if var_name in self.scope:
+                    obj = self.scope[var_name]
+                    args = [self._evaluate_expr(arg) for arg in node.value.args]
+                    
+                    message = ""
+                    if isinstance(obj, list):
+                        if method_name == 'append':
+                            obj.append(*args)
+                            message = f"Appends {repr(args[0])} to list '{var_name}'"
+                        elif method_name == 'pop':
+                            result = obj.pop(*args) if args else obj.pop()
+                            message = f"Pops {repr(result)} from list '{var_name}'"
+                    
+                    elif isinstance(obj, dict):
+                        if method_name == 'pop':
+                            result = obj.pop(*args)
+                            message = f"Pops key {repr(args[0])} from dict '{var_name}'"
+                        elif method_name == 'update':
+                            obj.update(*args)
+                            message = f"Updates dict '{var_name}'"
+                    
+                    if message:
+                        self._add_step(node.lineno, message)
+        
+        self.generic_visit(node)
+
     def visit_If(self, node):
         test = self._evaluate_expr(node.test)
         self._add_step(node.lineno, f"Evaluates condition which is: {test}")
@@ -112,6 +166,7 @@ class CodeVisitor(ast.NodeVisitor):
         elif node.orelse:
             for child_node in node.orelse:
                 self.visit(child_node)
+
     def visit_For(self, node):
         loop_var_name = node.target.id
         iterable = self._evaluate_expr(node.iter)
@@ -124,44 +179,20 @@ class CodeVisitor(ast.NodeVisitor):
             )
             for child_node in node.body:
                 self.visit(child_node)
+
     def visit_While(self, node):
         self._add_step(node.lineno, "Starts while-loop")
         while True:
             condition_val = self._evaluate_expr(node.test)
             self._add_step(node.lineno, f"Evaluates while-condition which is {condition_val}")
+
             if condition_val:
                 for child_node in node.body:
                     self.visit(child_node)
             else:
                 break
-    def visit_Expr(self, node):
-       if isinstance(node.value,ast.call):
-           if isinstance(node.value.func,ast.Attribute):
-               var_name = node.value.func.value.id
-               method_name = node.value.func.attr
-               if var_name in self.scope:
-                   obj = self.scope[var_name]
-                   args = [self._evaluate_expr(arg) for arg in node.value.args]
-                   message=""
-                   if isinstance(obj, list):
-                       if method_name == "append":
-                           obj.append(*args)
-                           message = f"Appended {args[0]} to list '{var_name}'"
-                       elif method_name == 'pop':
-                           result = obj.pop(*args)
-                           message = f"Pops {repr(result)} from list '{var_name}'"
-                   elif isinstance(obj, dict):
-                       if method_name == "update":
-                           obj.update(*args)
-                           message = f"Updated dictionary '{var_name}' with {args[0]}"
-                       elif method_name == 'get':
-                           result = obj.get(*args, None)
-                           message = f"Gets {repr(result)} from dictionary '{var_name}'"
-                       elif method_name == 'pop':
-                            result = obj.pop(*args)
-                            message = f"Pops key {repr(args[0])} from dict '{var_name}'"
-                   if message:
-                        self._add_step(node.lineno, message)
+
+# --- API Endpoint ---
 @app.post("/visualize")
 async def visualize_code(payload: CodePayload):
     try:
@@ -174,4 +205,4 @@ async def visualize_code(payload: CodePayload):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="localhost", port=8000, reload=True)
