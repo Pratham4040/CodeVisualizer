@@ -5,7 +5,6 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import copy 
 
-# --- FastAPI App Setup ---
 app = FastAPI(
     title="AlgoVisualizer",
     description="A web application for visualizing algorithms and data structures.",
@@ -27,7 +26,6 @@ class CodePayload(BaseModel):
 
 ITERATION_LIMIT = 1000
 
-# --- AST VISITOR CLASS ---
 class CodeVisitor(ast.NodeVisitor):
     def __init__(self):
         self.scope = {}
@@ -81,8 +79,6 @@ class CodeVisitor(ast.NodeVisitor):
             return op_map[type(node.ops[0])](left, right)
         
         elif isinstance(node, ast.Call):
-            # --- THIS IS THE FIX ---
-            # Handle the built-in len() function
             if isinstance(node.func, ast.Name) and node.func.id == 'len':
                 if len(node.args) == 1:
                     evaluated_arg = self._evaluate_expr(node.args[0])
@@ -192,7 +188,6 @@ class CodeVisitor(ast.NodeVisitor):
             else:
                 break
 
-# --- API Endpoint ---
 @app.post("/visualize")
 async def visualize_code(payload: CodePayload):
     try:
