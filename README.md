@@ -87,16 +87,6 @@ uvicorn main:app --reload
 
 ---
 
-### 🤝 Contributing
-Pull requests and issues are welcome! Please open an issue for bugs or feature requests.
-
----
-
-### 📄 License
-MIT License
-
----
-
 ### Credits
 - Built with [FastAPI](https://fastapi.tiangolo.com/)
 - Project by [Pratham4040](https://github.com/Pratham4040)
